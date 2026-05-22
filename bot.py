@@ -31,7 +31,7 @@ def get_claude_response(user_id, message):
     if len(conversation_history[user_id]) > 20:
         conversation_history[user_id] = conversation_history[user_id][-20:]
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-3-5-sonnet-20241022",
         max_tokens=1500,
         system=SYSTEM_PROMPT,
         messages=conversation_history[user_id],
