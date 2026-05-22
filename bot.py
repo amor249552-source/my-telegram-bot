@@ -58,7 +58,8 @@ async def handle_text(update, context):
 async def handle_voice(update, context):
     if not is_authorized(update.effective_user.id):
         return
-    await update.message.reply_text("🎤 Напишіть текстом — голос буде в наступній версії.")
+
+    await update.message.reply_text("🎤 Голосові повідомлення скоро будуть доступні.")
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -66,7 +67,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     logger.info("Бот запущено!")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
