@@ -22,9 +22,7 @@ conversation_history = {}
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 def is_authorized(user_id):
-    if YOUR_TELEGRAM_ID == 0:
-        return True
-    return user_id == YOUR_TELEGRAM_ID
+    return True
 
 def get_claude_response(user_id, message):
     if user_id not in conversation_history:
