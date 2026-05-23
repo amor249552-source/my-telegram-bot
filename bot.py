@@ -2,6 +2,7 @@ import os
 import logging
 import anthropic
 import requests
+import tempfile
 from telegram.ext import Application, MessageHandler, filters, CommandHandler
 
 logging.basicConfig(level=logging.INFO)
@@ -9,6 +10,8 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
+ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
 
 SYSTEM_PROMPT = """Ти — особистий AI-асистент для підприємця у сфері бізнесу та продажів.
 Твої задачі: допомагати з продажами, скриптами, переговорами, діловими листами, аналізом клієнтів, стратегією бізнесу.
@@ -33,16 +36,32 @@ def get_claude_response(user_id, message):
     conversation_history[user_id].append({"role": "assistant", "content": assistant_message})
     return assistant_message
 
+def text_to_speech(text):
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
+    headers = {"Accept": "audio/mpeg", "Content-Type": "application/json", "xi-api-key": ELEVENLABS_API_KEY}
+    data = {"text": text, "model_id": "eleven_multilingual_v2", "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}}
+    response = requests.post(url, json=data, headers=headers)
+    if response.status_code == 200:
+        return response.content
+    return None
+
 async def handle_start(update, context):
     await update.message.reply_text("👋 Привіт! Я твій AI-асистент для бізнесу. Пиши!")
 
 async def handle_text(update, context):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    response = get_claude_response(update.effective_user.id, update.message.text)
-    await update.message.reply_text(response)
+    response_text = get_claude_response(update.effective_user.id, update.message.text)
+    await update.message.reply_text(response_text)
+    if ELEVENLABS_API_KEY:
+        audio = text_to_speech(response_text[:500])
+        if audio:
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+                f.write(audio)
+                f.flush()
+                await context.bot.send_voice(chat_id=update.effective_chat.id, voice=open(f.name, "rb"))
 
 async def handle_voice(update, context):
-    await update.message.reply_text("🎤 Напишіть текстом — голос буде в наступній версії.")
+    await update.message.reply_text("🎤 Напишіть текстом — розпізнавання голосу буде в наступній версії.")
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
