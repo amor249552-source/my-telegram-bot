@@ -3,8 +3,6 @@ import logging
 import anthropic
 import requests
 import json
-import hmac
-import hashlib
 from flask import Flask, request, jsonify
 from telegram.ext import Application
 import threading
@@ -16,7 +14,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 INSTAGRAM_TOKEN = os.environ.get("INSTAGRAM_TOKEN")
-FACEBOOK_TOKEN = os.environ.get("FACEBOOK_TOKEN")       # Page Access Token для Messenger
+FACEBOOK_TOKEN = os.environ.get("FACEBOOK_TOKEN")
 INSTAGRAM_APP_SECRET = os.environ.get("INSTAGRAM_APP_SECRET")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
 YOUR_TELEGRAM_ID = int(os.environ.get("YOUR_TELEGRAM_ID", "411960109"))
@@ -127,7 +125,6 @@ def get_claude_response(user_id, message):
 
 
 def send_instagram_message(recipient_id, message):
-    """Відправка повідомлення в Instagram DM"""
     url = "https://graph.instagram.com/v21.0/me/messages"
     headers = {"Content-Type": "application/json"}
     data = {
@@ -137,12 +134,11 @@ def send_instagram_message(recipient_id, message):
     }
     params = {"access_token": INSTAGRAM_TOKEN}
     response = requests.post(url, headers=headers, json=data, params=params)
-    logger.info(f"Instagram send response: {response.status_code} {response.text}")
+    logger.info(f"Instagram send: {response.status_code} {response.text}")
     return response
 
 
 def send_facebook_message(recipient_id, message):
-    """Відправка повідомлення в Facebook Messenger"""
     url = "https://graph.facebook.com/v21.0/me/messages"
     headers = {"Content-Type": "application/json"}
     data = {
@@ -152,13 +148,13 @@ def send_facebook_message(recipient_id, message):
     }
     params = {"access_token": FACEBOOK_TOKEN}
     response = requests.post(url, headers=headers, json=data, params=params)
-    logger.info(f"Facebook send response: {response.status_code} {response.text}")
+    logger.info(f"Facebook send: {response.status_code} {response.text}")
     return response
 
 
-def notify_owner(message, tg_app):
+def notify_owner(message):
     async def send():
-        await tg_app.bot.send_message(chat_id=YOUR_TELEGRAM_ID, text=message)
+        await telegram_app.bot.send_message(chat_id=YOUR_TELEGRAM_ID, text=message)
     asyncio.run(send())
 
 
@@ -167,87 +163,76 @@ def check_order_keywords(text):
     return any(kw in text.lower() for kw in keywords)
 
 
-# ──────────────────────────────────────────────
-# WEBHOOK — верифікація (GET)
-# ──────────────────────────────────────────────
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
     mode = request.args.get("hub.mode")
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
+    logger.info(f"Verify: mode={mode}, token={token}")
     if mode == "subscribe" and token == VERIFY_TOKEN:
-        logger.info("Webhook verified successfully!")
+        logger.info("Webhook verified!")
         return challenge, 200
-    logger.warning("Webhook verification failed!")
     return "Forbidden", 403
 
 
-# ──────────────────────────────────────────────
-# WEBHOOK — отримання повідомлень (POST)
-# ──────────────────────────────────────────────
 @app.route("/webhook", methods=["POST"])
 def handle_webhook():
     data = request.json
-    logger.info(f"Webhook received: {json.dumps(data)}")
+    logger.info(f"Webhook: {json.dumps(data)}")
 
     try:
         object_type = data.get("object", "")
 
-        # ── INSTAGRAM DM ──────────────────────────────
+        # Instagram DM
         if object_type == "instagram":
             for entry in data.get("entry", []):
-
-                # Формат 1: через "changes" (Instagram Webhooks API)
                 for change in entry.get("changes", []):
                     value = change.get("value", {})
                     messages = value.get("messages", [])
                     for msg in messages:
                         sender_id = msg.get("from", {}).get("id")
-                        text = msg.get("text", {}).get("body", "") if isinstance(msg.get("text"), dict) else msg.get("text", "")
+                        text = ""
+                        if isinstance(msg.get("text"), dict):
+                            text = msg.get("text", {}).get("body", "")
+                        else:
+                            text = msg.get("text", "")
                         if text and sender_id:
-                            logger.info(f"Instagram DM (changes) from {sender_id}: {text}")
+                            logger.info(f"Instagram from {sender_id}: {text}")
                             response_text = get_claude_response(f"ig_{sender_id}", text)
                             send_instagram_message(sender_id, response_text)
                             if check_order_keywords(text) and telegram_app:
-                                notify_msg = f"📦 НОВЕ ЗАМОВЛЕННЯ (Instagram)!\n\nКлієнт ID: {sender_id}\nДані:\n{text}"
-                                threading.Thread(target=notify_owner, args=(notify_msg, telegram_app)).start()
+                                notify_msg = f"📦 ЗАМОВЛЕННЯ (Instagram)!\nКлієнт: {sender_id}\n{text}"
+                                threading.Thread(target=notify_owner, args=(notify_msg,)).start()
 
-                # Формат 2: через "messaging" (старий формат)
                 for messaging in entry.get("messaging", []):
                     sender_id = messaging.get("sender", {}).get("id")
-                    message = messaging.get("message", {})
-                    text = message.get("text", "")
+                    text = messaging.get("message", {}).get("text", "")
                     if text and sender_id:
-                        logger.info(f"Instagram DM (messaging) from {sender_id}: {text}")
+                        logger.info(f"Instagram messaging from {sender_id}: {text}")
                         response_text = get_claude_response(f"ig_{sender_id}", text)
                         send_instagram_message(sender_id, response_text)
                         if check_order_keywords(text) and telegram_app:
-                            notify_msg = f"📦 НОВЕ ЗАМОВЛЕННЯ (Instagram)!\n\nКлієнт ID: {sender_id}\nДані:\n{text}"
-                            threading.Thread(target=notify_owner, args=(notify_msg, telegram_app)).start()
+                            notify_msg = f"📦 ЗАМОВЛЕННЯ (Instagram)!\nКлієнт: {sender_id}\n{text}"
+                            threading.Thread(target=notify_owner, args=(notify_msg,)).start()
 
-        # ── FACEBOOK MESSENGER ────────────────────────
+        # Facebook Messenger
         elif object_type == "page":
             for entry in data.get("entry", []):
                 for messaging in entry.get("messaging", []):
-                    sender_id = messaging.get("sender", {}).get("id")
-                    message = messaging.get("message", {})
-                    text = message.get("text", "")
-                    # Ігноруємо echo (повідомлення від самої сторінки)
-                    if message.get("is_echo"):
+                    if messaging.get("message", {}).get("is_echo"):
                         continue
+                    sender_id = messaging.get("sender", {}).get("id")
+                    text = messaging.get("message", {}).get("text", "")
                     if text and sender_id:
-                        logger.info(f"Facebook Messenger from {sender_id}: {text}")
+                        logger.info(f"Facebook from {sender_id}: {text}")
                         response_text = get_claude_response(f"fb_{sender_id}", text)
                         send_facebook_message(sender_id, response_text)
                         if check_order_keywords(text) and telegram_app:
-                            notify_msg = f"📦 НОВЕ ЗАМОВЛЕННЯ (Facebook)!\n\nКлієнт ID: {sender_id}\nДані:\n{text}"
-                            threading.Thread(target=notify_owner, args=(notify_msg, telegram_app)).start()
-
-        else:
-            logger.warning(f"Unknown object type: {object_type}")
+                            notify_msg = f"📦 ЗАМОВЛЕННЯ (Facebook)!\nКлієнт: {sender_id}\n{text}"
+                            threading.Thread(target=notify_owner, args=(notify_msg,)).start()
 
     except Exception as e:
-        logger.error(f"Webhook error: {e}", exc_info=True)
+        logger.error(f"Error: {e}", exc_info=True)
 
     return jsonify({"status": "ok"}), 200
 
@@ -255,14 +240,6 @@ def handle_webhook():
 @app.route("/", methods=["GET"])
 def health():
     return "AMO Clothes Bot is running! ✅", 200
-
-
-# ──────────────────────────────────────────────
-# TELEGRAM
-# ──────────────────────────────────────────────
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
 
 
 async def run_telegram():
@@ -286,12 +263,24 @@ async def run_telegram():
     await telegram_app.start()
     await telegram_app.updater.start_polling(drop_pending_updates=True)
     logger.info("Telegram bot started!")
+    await telegram_app.updater.idle()
 
 
 def main():
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    asyncio.run(run_telegram())
+    port = int(os.environ.get("PORT", 8080))
+    
+    # Запускаємо Telegram в окремому потоці
+    def run_telegram_thread():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(run_telegram())
+
+    t = threading.Thread(target=run_telegram_thread, daemon=True)
+    t.start()
+
+    # Flask запускається в головному потоці
+    logger.info(f"Starting Flask on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":
