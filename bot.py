@@ -263,7 +263,7 @@ async def run_telegram():
     await telegram_app.start()
     await telegram_app.updater.start_polling(drop_pending_updates=True)
     logger.info("Telegram bot started!")
-    await telegram_app.updater.idle()
+    
 
 
 def main():
