@@ -19,7 +19,6 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 YOUR_TELEGRAM_ID = int(os.environ.get("YOUR_TELEGRAM_ID", "411960109"))
 
 app = Flask(__name__)
-telegram_app = None
 
 SYSTEM_PROMPT = """Ти — консультант магазину чоловічого одягу AMO Clothes. Спілкуйся тепло але офіційно, виключно українською мовою. Відповідай коротко і по суті — як у реальному чаті. Якщо клієнт просить фото — скидай посилання на фото відповідного товару.
 
@@ -206,11 +205,10 @@ def handle_webhook():
     return jsonify({"status": "ok"}), 200
 
 
-# ── TELEGRAM ──────────────────────────────────
-def run_telegram():
+# Запускаємо Telegram в окремому потоці при імпорті модуля
+def _run_telegram():
     async def main():
-        global telegram_app
-        telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
+        tg_app = Application.builder().token(TELEGRAM_TOKEN).build()
 
         async def handle_start(update, context):
             await update.message.reply_text("👋 Вітаємо в AMO Clothes! Чим можу допомогти? 😊")
@@ -220,22 +218,24 @@ def run_telegram():
             response = get_claude_response(f"tg_{update.effective_user.id}", update.message.text)
             await update.message.reply_text(response)
 
-        telegram_app.add_handler(CommandHandler("start", handle_start))
-        telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+        tg_app.add_handler(CommandHandler("start", handle_start))
+        tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-        async with telegram_app:
-            await telegram_app.start()
-            await telegram_app.updater.start_polling(drop_pending_updates=True)
+        async with tg_app:
+            await tg_app.start()
+            await tg_app.updater.start_polling(drop_pending_updates=True)
+            logger.info("Telegram bot started!")
             await asyncio.sleep(float('inf'))
 
     asyncio.run(main())
 
 
-if __name__ == "__main__":
-    t = threading.Thread(target=run_telegram, daemon=True)
-    t.start()
-    logger.info("Telegram thread started")
+# Запускаємо Telegram при завантаженні модуля
+_telegram_thread = threading.Thread(target=_run_telegram, daemon=True)
+_telegram_thread.start()
+logger.info("Telegram thread launched")
 
+
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    logger.info(f"Starting Flask on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
