@@ -4,6 +4,9 @@ import anthropic
 import requests
 import json
 from flask import Flask, request, jsonify
+import threading
+import asyncio
+from telegram.ext import Application, MessageHandler, filters, CommandHandler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -12,8 +15,11 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 INSTAGRAM_TOKEN = os.environ.get("INSTAGRAM_TOKEN")
 FACEBOOK_TOKEN = os.environ.get("FACEBOOK_TOKEN")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+YOUR_TELEGRAM_ID = int(os.environ.get("YOUR_TELEGRAM_ID", "411960109"))
 
 app = Flask(__name__)
+telegram_app = None
 
 SYSTEM_PROMPT = """Ти — консультант магазину чоловічого одягу AMO Clothes. Спілкуйся тепло але офіційно, виключно українською мовою. Відповідай коротко і по суті — як у реальному чаті. Якщо клієнт просить фото — скидай посилання на фото відповідного товару.
 
@@ -179,7 +185,6 @@ def handle_webhook():
                     sender_id = messaging.get("sender", {}).get("id")
                     text = messaging.get("message", {}).get("text", "")
                     if text and sender_id:
-                        logger.info(f"Instagram msg from {sender_id}: {text}")
                         reply = get_claude_response(f"ig_{sender_id}", text)
                         send_instagram_message(sender_id, reply)
 
@@ -191,7 +196,7 @@ def handle_webhook():
                     sender_id = messaging.get("sender", {}).get("id")
                     text = messaging.get("message", {}).get("text", "")
                     if text and sender_id:
-                        logger.info(f"Facebook msg from {sender_id}: {text}")
+                        logger.info(f"Facebook from {sender_id}: {text}")
                         reply = get_claude_response(f"fb_{sender_id}", text)
                         send_facebook_message(sender_id, reply)
 
@@ -201,7 +206,36 @@ def handle_webhook():
     return jsonify({"status": "ok"}), 200
 
 
+# ── TELEGRAM ──────────────────────────────────
+def run_telegram():
+    async def main():
+        global telegram_app
+        telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+        async def handle_start(update, context):
+            await update.message.reply_text("👋 Вітаємо в AMO Clothes! Чим можу допомогти? 😊")
+
+        async def handle_text(update, context):
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+            response = get_claude_response(f"tg_{update.effective_user.id}", update.message.text)
+            await update.message.reply_text(response)
+
+        telegram_app.add_handler(CommandHandler("start", handle_start))
+        telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+        async with telegram_app:
+            await telegram_app.start()
+            await telegram_app.updater.start_polling(drop_pending_updates=True)
+            await asyncio.sleep(float('inf'))
+
+    asyncio.run(main())
+
+
 if __name__ == "__main__":
+    t = threading.Thread(target=run_telegram, daemon=True)
+    t.start()
+    logger.info("Telegram thread started")
+
     port = int(os.environ.get("PORT", 8080))
-    logger.info(f"Starting on port {port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    logger.info(f"Starting Flask on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
