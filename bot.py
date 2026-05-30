@@ -3,10 +3,12 @@ import logging
 import anthropic
 import requests
 import json
+import re
 from flask import Flask, request, jsonify
 import threading
 import asyncio
 from telegram.ext import Application, MessageHandler, filters, CommandHandler
+from telegram import Bot
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -99,10 +101,21 @@ SYSTEM_PROMPT = """Ти — консультант магазину чолові
 ОБМІН/ПОВЕРНЕННЯ/ПЕРЕДОПЛАТА → "Зачекайте будь ласка, уточню у власника і відпишу 🙏"
 
 СТИЛЬ: коротко, тепло, емодзі помірно. Незнайоме → "Уточню у власника і відпишу 🙏"
+
+ВАЖЛИВО: Коли клієнт надає дані для відправки (ім'я, місто, телефон, відділення), обов'язково підтвердь замовлення і в кінці своєї відповіді додай спеціальний блок у форматі:
+##ЗАМОВЛЕННЯ##
+Імʼя: [імʼя клієнта]
+Телефон: [телефон]
+Місто: [місто та область]
+Нова Пошта: [номер відділення]
+Товар: [назва товару, колір, розмір]
+Фото: [посилання на фото товару]
+##КІНЕЦЬ##
 """
 
 conversation_history = {}
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+_telegram_bot = None
 
 
 def get_claude_response(user_id, message):
@@ -120,6 +133,49 @@ def get_claude_response(user_id, message):
     assistant_message = response.content[0].text
     conversation_history[user_id].append({"role": "assistant", "content": assistant_message})
     return assistant_message
+
+
+def parse_order(text):
+    """Витягує дані замовлення з відповіді Claude"""
+    match = re.search(r'##ЗАМОВЛЕННЯ##(.*?)##КІНЕЦЬ##', text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def clean_response(text):
+    """Прибирає блок замовлення з відповіді для клієнта"""
+    return re.sub(r'##ЗАМОВЛЕННЯ##.*?##КІНЕЦЬ##', '', text, flags=re.DOTALL).strip()
+
+
+def notify_owner_order(order_text, channel):
+    """Надсилає замовлення власнику в Telegram"""
+    def send():
+        try:
+            bot = Bot(token=TELEGRAM_TOKEN)
+            # Витягуємо посилання на фото
+            photo_match = re.search(r'Фото:\s*(https?://\S+)', order_text)
+            photo_url = photo_match.group(1) if photo_match else None
+
+            message = f"🛍 НОВЕ ЗАМОВЛЕННЯ ({channel})!\n\n{order_text}"
+
+            async def _send():
+                await bot.send_message(
+                    chat_id=YOUR_TELEGRAM_ID,
+                    text=message
+                )
+                if photo_url:
+                    await bot.send_message(
+                        chat_id=YOUR_TELEGRAM_ID,
+                        text=f"📸 Фото товару:\n{photo_url}"
+                    )
+
+            asyncio.run(_send())
+            logger.info("Order notification sent to owner!")
+        except Exception as e:
+            logger.error(f"Failed to notify owner: {e}")
+
+    threading.Thread(target=send, daemon=True).start()
 
 
 def send_instagram_message(recipient_id, message):
@@ -144,6 +200,19 @@ def send_facebook_message(recipient_id, message):
     logger.info(f"Facebook send: {response.status_code} {response.text}")
 
 
+def process_message(user_id, text, send_func, channel):
+    """Обробляє повідомлення і перевіряє чи є замовлення"""
+    reply = get_claude_response(user_id, text)
+    order = parse_order(reply)
+    clean_reply = clean_response(reply)
+
+    if order:
+        notify_owner_order(order, channel)
+
+    send_func(clean_reply)
+    return clean_reply
+
+
 @app.route("/", methods=["GET"])
 def health():
     return "AMO Clothes Bot is running! ✅", 200
@@ -154,7 +223,6 @@ def verify_webhook():
     mode = request.args.get("hub.mode")
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
-    logger.info(f"Verify webhook: mode={mode}, token={token}")
     if mode == "subscribe" and token == VERIFY_TOKEN:
         logger.info("Webhook verified!")
         return challenge, 200
@@ -177,15 +245,21 @@ def handle_webhook():
                         text = msg.get("text", {}).get("body", "") if isinstance(msg.get("text"), dict) else msg.get("text", "")
                         if text and sender_id:
                             logger.info(f"Instagram DM from {sender_id}: {text}")
-                            reply = get_claude_response(f"ig_{sender_id}", text)
-                            send_instagram_message(sender_id, reply)
+                            process_message(
+                                f"ig_{sender_id}", text,
+                                lambda reply: send_instagram_message(sender_id, reply),
+                                "Instagram"
+                            )
 
                 for messaging in entry.get("messaging", []):
                     sender_id = messaging.get("sender", {}).get("id")
                     text = messaging.get("message", {}).get("text", "")
                     if text and sender_id:
-                        reply = get_claude_response(f"ig_{sender_id}", text)
-                        send_instagram_message(sender_id, reply)
+                        process_message(
+                            f"ig_{sender_id}", text,
+                            lambda reply: send_instagram_message(sender_id, reply),
+                            "Instagram"
+                        )
 
         elif object_type == "page":
             for entry in data.get("entry", []):
@@ -195,9 +269,11 @@ def handle_webhook():
                     sender_id = messaging.get("sender", {}).get("id")
                     text = messaging.get("message", {}).get("text", "")
                     if text and sender_id:
-                        logger.info(f"Facebook from {sender_id}: {text}")
-                        reply = get_claude_response(f"fb_{sender_id}", text)
-                        send_facebook_message(sender_id, reply)
+                        process_message(
+                            f"fb_{sender_id}", text,
+                            lambda reply: send_facebook_message(sender_id, reply),
+                            "Facebook"
+                        )
 
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
@@ -205,7 +281,7 @@ def handle_webhook():
     return jsonify({"status": "ok"}), 200
 
 
-# Запускаємо Telegram в окремому потоці при імпорті модуля
+# ── TELEGRAM ──────────────────────────────────
 def _run_telegram():
     async def main():
         tg_app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -215,8 +291,17 @@ def _run_telegram():
 
         async def handle_text(update, context):
             await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-            response = get_claude_response(f"tg_{update.effective_user.id}", update.message.text)
-            await update.message.reply_text(response)
+            user_id = f"tg_{update.effective_user.id}"
+            text = update.message.text
+
+            reply = get_claude_response(user_id, text)
+            order = parse_order(reply)
+            clean_reply = clean_response(reply)
+
+            if order:
+                notify_owner_order(order, "Telegram")
+
+            await update.message.reply_text(clean_reply)
 
         tg_app.add_handler(CommandHandler("start", handle_start))
         tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -230,7 +315,6 @@ def _run_telegram():
     asyncio.run(main())
 
 
-# Запускаємо Telegram при завантаженні модуля
 _telegram_thread = threading.Thread(target=_run_telegram, daemon=True)
 _telegram_thread.start()
 logger.info("Telegram thread launched")
